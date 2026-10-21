@@ -16,13 +16,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2. Install Node.js and project dependencies
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -33,11 +31,9 @@ jobs:
         continue-on-error: true
         run: npm install
 
-      # 3. Snyk setup
       - name: Set up Snyk CLI
         uses: snyk/actions/setup@master
 
-      # 4. SAST scan
       - name: Snyk SAST scan
         id: sast
         continue-on-error: true
@@ -45,7 +41,6 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk code test --severity-threshold=high
 
-      # 5. SCA scan
       - name: Snyk SCA scan
         id: sca
         continue-on-error: true
@@ -53,7 +48,6 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk test --severity-threshold=high
 
-      # 6. Secret scanning
       - name: GitGuardian secret scan
         id: secrets
         continue-on-error: true
@@ -67,7 +61,6 @@ jobs:
           GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
-      # 7. Start OWASP Juice Shop
       - name: Start OWASP Juice Shop
         id: juice
         continue-on-error: true
@@ -88,12 +81,13 @@ jobs:
           echo "Juice Shop failed to start"
           exit 1
 
-      # 8. DAST scan
       - name: Run OWASP ZAP Baseline scan
         id: zap
         if: always() && steps.juice.outcome == 'success'
         continue-on-error: true
         run: |
+          set -u
+
           mkdir -p "$GITHUB_WORKSPACE/zap-output"
           chmod 777 "$GITHUB_WORKSPACE/zap-output"
 
@@ -112,10 +106,17 @@ jobs:
           set +e
           docker start -a zap-scan
           rc=$?
+          set -e
+
           echo "$rc" > "$GITHUB_WORKSPACE/zap-output/zap-status.txt"
+          echo "ZAP container exit code: $rc"
+
+          docker logs zap-scan || true
+          ls -la "$GITHUB_WORKSPACE/zap-output"
+
+          # The central quality gate decides the final result.
           exit 0
 
-      # 9. Single central quality gate
       - name: Central Security Quality Gate
         if: always()
         env:
@@ -137,19 +138,19 @@ jobs:
 
           echo "Checking Snyk SAST..."
           if [ "$SAST_RESULT" != "success" ]; then
-            echo "FAIL: Snyk SAST found blocking findings or encountered an error"
+            echo "FAIL: Snyk SAST found blocking findings"
             failed=1
           fi
 
           echo "Checking Snyk SCA..."
           if [ "$SCA_RESULT" != "success" ]; then
-            echo "FAIL: Snyk SCA found blocking findings or encountered an error"
+            echo "FAIL: Snyk SCA found blocking findings"
             failed=1
           fi
 
           echo "Checking GitGuardian..."
           if [ "$SECRETS_RESULT" != "success" ]; then
-            echo "FAIL: GitGuardian detected a secret or encountered an error"
+            echo "FAIL: GitGuardian secret scan failed"
             failed=1
           fi
 
@@ -168,35 +169,52 @@ jobs:
           REPORT="$GITHUB_WORKSPACE/zap-output/zap-report.json"
           STATUS="$GITHUB_WORKSPACE/zap-output/zap-status.txt"
 
-          echo "Checking ZAP report..."
+          echo "Checking ZAP DAST results..."
 
           if [ ! -s "$REPORT" ] || [ ! -s "$STATUS" ]; then
-            echo "FAIL: ZAP report or scan status is missing"
+            echo "FAIL: ZAP report or status is missing"
             failed=1
+
           elif ! jq -e '.site | type == "array"' "$REPORT" >/dev/null 2>&1; then
             echo "FAIL: ZAP report is invalid"
             failed=1
+
           else
             zap_rc=$(cat "$STATUS")
 
             if ! [[ "$zap_rc" =~ ^[0-9]+$ ]]; then
               echo "FAIL: Invalid ZAP exit status"
               failed=1
-            elif [ "$zap_rc" -ge 2 ]; then
-              echo "FAIL: ZAP encountered a scan error (exit $zap_rc)"
-              failed=1
-            fi
 
-            high_count=$(jq \
-              '[.site[]?.alerts[]? |
-                select((.riskcode | tostring) == "3")] | length' \
-              "$REPORT")
-
-            if [ "$high_count" -gt 0 ]; then
-              echo "FAIL: ZAP reported $high_count High-risk alert(s)"
+            elif [ "$zap_rc" -eq 3 ]; then
+              echo "FAIL: ZAP encountered a scan error"
               failed=1
+
             else
-              echo "PASS: No High-risk ZAP alerts found"
+              # ZAP riskcode 3 represents High risk.
+              high_count=$(jq \
+                '[.site[]?.alerts[]? |
+                  select((.riskcode | tostring) == "3")] | length' \
+                "$REPORT")
+
+              if [ "$high_count" -gt 0 ]; then
+                echo "FAIL: ZAP reported $high_count High-risk alert(s)"
+                failed=1
+
+              elif [ "$zap_rc" -eq 1 ]; then
+                echo "FAIL: ZAP reported FAIL alerts"
+                failed=1
+
+              elif [ "$zap_rc" -eq 2 ]; then
+                echo "PASS: ZAP reported warnings only"
+              
+              elif [ "$zap_rc" -eq 0 ]; then
+                echo "PASS: ZAP completed without FAIL or WARN alerts"
+
+              else
+                echo "FAIL: Unexpected ZAP exit code $zap_rc"
+                failed=1
+              fi
             fi
           fi
 
@@ -209,7 +227,6 @@ jobs:
 
           echo "SECURITY QUALITY GATE: PASSED"
 
-      # 10. Save DAST report for review
       - name: Upload ZAP report
         if: always()
         uses: actions/upload-artifact@v4
@@ -218,7 +235,6 @@ jobs:
           path: zap-output/
           if-no-files-found: warn
 
-      # 11. Cleanup
       - name: Clean up containers
         if: always()
         run: |
