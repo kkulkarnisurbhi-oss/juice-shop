@@ -1,0 +1,66 @@
+
+name: OWASP ZAP - Juice Shop DAST
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dast:
+    name: Run ZAP Baseline Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Start OWASP Juice Shop
+        run: |
+          docker run -d \
+            --name juice-shop \
+            -p 127.0.0.1:3000:3000 \
+            bkimminich/juice-shop
+
+      - name: Wait for Juice Shop to start
+        shell: bash
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:3000/ \
+              -o /dev/null; then
+              echo "Juice Shop is ready!"
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker logs juice-shop
+          echo "Juice Shop failed to start"
+          exit 1
+
+      - name: Run OWASP ZAP Baseline Scan
+        run: |
+          docker run --rm \
+            --network host \
+            -v "$GITHUB_WORKSPACE:/zap/wrk/:rw" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+            -t http://127.0.0.1:3000 \
+            -m 3 \
+            -J zap-report.json \
+            -r zap-report.html
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-dast-reports
+          path: |
+            zap-report.json
+            zap-report.html
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Stop Juice Shop
+        if: always()
+        run: docker rm -f juice-shop || true
