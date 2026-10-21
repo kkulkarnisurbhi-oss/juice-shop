@@ -47,8 +47,7 @@ jobs:
             zap-baseline.py \
             -t http://127.0.0.1:3000 \
             -m 3 \
-            -J zap-report.json \
-            -r zap-report.html
+            -J zap-report.json
 
       - name: Upload ZAP reports
         if: always()
