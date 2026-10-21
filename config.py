@@ -1,4 +1,4 @@
-# test_secrets.py
+
 DATABASE_PASSWORD = "NzQ5YjdmM2UtNzQxMC00NDNnLThhNzEtMTI3M2NjM2M5YThh"
 
 
