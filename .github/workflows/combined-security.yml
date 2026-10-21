@@ -16,11 +16,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 2. Install Node.js and project dependencies
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -31,9 +33,11 @@ jobs:
         continue-on-error: true
         run: npm install
 
+      # 3. Snyk setup
       - name: Set up Snyk CLI
         uses: snyk/actions/setup@master
 
+      # 4. SAST scan
       - name: Snyk SAST scan
         id: sast
         continue-on-error: true
@@ -41,6 +45,7 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk code test --severity-threshold=high
 
+      # 5. SCA scan
       - name: Snyk SCA scan
         id: sca
         continue-on-error: true
@@ -48,10 +53,13 @@ jobs:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: snyk test --severity-threshold=high
 
+      # 6. Secret scanning
       - name: GitGuardian secret scan
         id: secrets
         continue-on-error: true
         uses: GitGuardian/ggshield/actions/secret@v1.55.0
+        with:
+          args: --all-secrets
         env:
           GITGUARDIAN_API_KEY: ${{ secrets.GGSHIELD_TOKEN }}
           GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
@@ -59,6 +67,7 @@ jobs:
           GITHUB_PULL_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
 
+      # 7. Start OWASP Juice Shop
       - name: Start OWASP Juice Shop
         id: juice
         continue-on-error: true
@@ -79,7 +88,8 @@ jobs:
           echo "Juice Shop failed to start"
           exit 1
 
-      - name: Run OWASP ZAP Baseline DAST
+      # 8. DAST scan
+      - name: Run OWASP ZAP Baseline scan
         id: zap
         if: always() && steps.juice.outcome == 'success'
         continue-on-error: true
@@ -105,6 +115,7 @@ jobs:
           echo "$rc" > "$GITHUB_WORKSPACE/zap-output/zap-status.txt"
           exit 0
 
+      # 9. Single central quality gate
       - name: Central Security Quality Gate
         if: always()
         env:
@@ -120,7 +131,7 @@ jobs:
 
           echo "Checking dependency installation..."
           if [ "$INSTALL_RESULT" != "success" ]; then
-            echo "FAIL: npm install failed"
+            echo "FAIL: Dependency installation failed"
             failed=1
           fi
 
@@ -142,12 +153,13 @@ jobs:
             failed=1
           fi
 
-          echo "Checking Juice Shop and ZAP..."
+          echo "Checking Juice Shop..."
           if [ "$JUICE_RESULT" != "success" ]; then
             echo "FAIL: Juice Shop failed to start"
             failed=1
           fi
 
+          echo "Checking ZAP execution..."
           if [ "$ZAP_RESULT" != "success" ]; then
             echo "FAIL: ZAP scan step failed"
             failed=1
@@ -156,8 +168,10 @@ jobs:
           REPORT="$GITHUB_WORKSPACE/zap-output/zap-report.json"
           STATUS="$GITHUB_WORKSPACE/zap-output/zap-status.txt"
 
+          echo "Checking ZAP report..."
+
           if [ ! -s "$REPORT" ] || [ ! -s "$STATUS" ]; then
-            echo "FAIL: ZAP report or status is missing"
+            echo "FAIL: ZAP report or scan status is missing"
             failed=1
           elif ! jq -e '.site | type == "array"' "$REPORT" >/dev/null 2>&1; then
             echo "FAIL: ZAP report is invalid"
@@ -166,7 +180,7 @@ jobs:
             zap_rc=$(cat "$STATUS")
 
             if ! [[ "$zap_rc" =~ ^[0-9]+$ ]]; then
-              echo "FAIL: ZAP exit status is invalid"
+              echo "FAIL: Invalid ZAP exit status"
               failed=1
             elif [ "$zap_rc" -ge 2 ]; then
               echo "FAIL: ZAP encountered a scan error (exit $zap_rc)"
@@ -179,7 +193,7 @@ jobs:
               "$REPORT")
 
             if [ "$high_count" -gt 0 ]; then
-              echo "FAIL: ZAP found $high_count High-risk alert(s)"
+              echo "FAIL: ZAP reported $high_count High-risk alert(s)"
               failed=1
             else
               echo "PASS: No High-risk ZAP alerts found"
@@ -187,6 +201,7 @@ jobs:
           fi
 
           echo "------------------------------------"
+
           if [ "$failed" -ne 0 ]; then
             echo "SECURITY QUALITY GATE: FAILED"
             exit 1
@@ -194,6 +209,7 @@ jobs:
 
           echo "SECURITY QUALITY GATE: PASSED"
 
+      # 10. Save DAST report for review
       - name: Upload ZAP report
         if: always()
         uses: actions/upload-artifact@v4
@@ -202,6 +218,7 @@ jobs:
           path: zap-output/
           if-no-files-found: warn
 
+      # 11. Cleanup
       - name: Clean up containers
         if: always()
         run: |
