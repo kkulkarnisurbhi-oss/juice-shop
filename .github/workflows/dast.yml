@@ -3,7 +3,9 @@ name: OWASP ZAP DAST - Juice Shop
 
 on:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
@@ -15,15 +17,15 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Start Juice Shop
-      - name: Start Juice Shop
+      # 1. Start the Juice Shop application
+      - name: Start OWASP Juice Shop
         run: |
           docker run -d \
             --name juice-shop \
             -p 127.0.0.1:3000:3000 \
             bkimminich/juice-shop
 
-      # 2. Wait for Juice Shop to become ready
+      # 2. Wait until the application is ready
       - name: Wait for Juice Shop
         shell: bash
         run: |
@@ -33,6 +35,8 @@ jobs:
               echo "Juice Shop is ready"
               exit 0
             fi
+
+            echo "Waiting for Juice Shop..."
             sleep 2
           done
 
@@ -40,25 +44,29 @@ jobs:
           docker logs juice-shop
           exit 1
 
-      # 3. Create a ZAP container
+      # 3. Create a writable directory for ZAP reports
+      - name: Prepare ZAP output directory
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/zap-output"
+          chmod 777 "$GITHUB_WORKSPACE/zap-output"
+
+      # 4. Create the ZAP container with the output directory mounted
       - name: Prepare ZAP container
         run: |
-          mkdir -p zap-output
-
           docker pull ghcr.io/zaproxy/zaproxy:stable
 
           docker create \
             --name zap-scan \
             --network host \
+            -v "$GITHUB_WORKSPACE/zap-output:/zap/wrk/:rw" \
             ghcr.io/zaproxy/zaproxy:stable \
             zap-baseline.py \
             -t http://127.0.0.1:3000 \
             -m 3 \
-            -J /zap/wrk/zap-report.json
+            -J zap-report.json
 
-      # 4. Run the scan and capture its exit code
-      - name: Run ZAP Baseline Scan
-        id: zap
+      # 5. Run the scan and preserve its exit code
+      - name: Run OWASP ZAP Baseline Scan
         shell: bash
         run: |
           set +e
@@ -66,40 +74,34 @@ jobs:
           rc=$?
           set -e
 
-          echo "ZAP exit code: $rc"
           echo "$rc" > zap-output/zap-status.txt
+          echo "ZAP exit code: $rc"
 
-          # Preserve the scan result for debugging.
+          # Allow report upload and cleanup even if ZAP returns nonzero.
           exit 0
 
-      # 5. Collect diagnostic information and reports
-      - name: Debug ZAP and collect report
+      # 6. Inspect reports and logs for troubleshooting
+      - name: Debug ZAP results
         if: always()
         shell: bash
         run: |
-          echo "===== Containers ====="
-          docker ps -a || true
-
-          echo "===== ZAP logs ====="
+          echo "===== ZAP container logs ====="
           docker logs zap-scan || true
 
           echo "===== Juice Shop logs ====="
           docker logs juice-shop || true
 
-          echo "===== Copy ZAP report ====="
-          if docker cp \
-            zap-scan:/zap/wrk/zap-report.json \
-            zap-output/zap-report.json; then
-            echo "ZAP JSON report copied successfully"
-          else
-            echo "ZAP JSON report was not generated"
-          fi
-
-          echo "===== Output directory ====="
+          echo "===== ZAP output files ====="
           ls -la zap-output || true
 
-      # 6. Upload reports even if the scan fails
-      - name: Upload ZAP artifacts
+          if [ -f zap-output/zap-report.json ]; then
+            echo "ZAP JSON report generated successfully"
+          else
+            echo "ZAP JSON report is missing"
+          fi
+
+      # 7. Upload reports
+      - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -108,7 +110,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-      # 7. Clean up
+      # 8. Clean up both containers
       - name: Cleanup containers
         if: always()
         run: |
